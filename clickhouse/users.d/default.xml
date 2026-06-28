@@ -1,0 +1,16 @@
+<clickhouse>
+  <!-- Разрешаем пользователю default подключаться со всех адресов без пароля.
+       По умолчанию образ ограничивает default только localhost, из-за чего
+       Airflow/хост не могут достучаться. Для локального стенда это норм. -->
+  <users>
+    <default>
+      <password></password>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+      <profile>default</profile>
+      <quota>default</quota>
+      <access_management>1</access_management>
+    </default>
+  </users>
+</clickhouse>

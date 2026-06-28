@@ -1,0 +1,145 @@
+# ============================================================================
+# Delivery Batch Analytics on Spark.
+#
+#   cp .env.example .env
+#   docker compose up -d --build
+#
+# Spark работает в local[*]-режиме внутри Airflow (pyspark + JDK в образе) —
+# для датасета в десятки млн строк отдельный кластер не нужен, а демонстрация
+# DataFrame API / оптимизаций / Spark UI полностью сохраняется.
+# ============================================================================
+name: darkstore-batch
+
+x-airflow-common: &airflow-common
+  build:
+    context: ./airflow
+  env_file: .env
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    # подключение для FileSensor (по умолчанию fs_default не создаётся)
+    AIRFLOW_CONN_FS_DEFAULT: "fs://"
+    # доступы и настройки Spark прокидываем в задачи
+    CLICKHOUSE_HOST: ${CLICKHOUSE_HOST}
+    CLICKHOUSE_HTTP_PORT: ${CLICKHOUSE_HTTP_PORT}
+    CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+    CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    CLICKHOUSE_DB: ${CLICKHOUSE_DB}
+    SPARK_DRIVER_MEMORY: ${SPARK_DRIVER_MEMORY}
+    SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS}
+    # пути внутри контейнера
+    DATA_DIR: /opt/airflow/data
+    JOBS_DIR: /opt/spark/jobs
+    SPARK_EVENTS_DIR: /opt/airflow/data/spark-events
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./spark:/opt/spark
+    - ./data:/opt/airflow/data
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: batch-clickhouse
+    ports:
+      - "8124:8123"     # HTTP (8123 занят Project 1, если он поднят)
+      - "9011:9000"     # native
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    # пользователя default НЕ переопределяем через env (иначе образ ломает
+    # его аутентификацию) — используем штатный default без пароля
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d
+      - ./clickhouse/users.d:/etc/clickhouse-server/users.d
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+
+  airflow-postgres:
+    image: postgres:16
+    container_name: batch-airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: "no"
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: batch-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate
+        airflow users create \
+          --username "${_AIRFLOW_WWW_USER_USERNAME}" \
+          --password "${_AIRFLOW_WWW_USER_PASSWORD}" \
+          --firstname admin --lastname admin --role Admin --email admin@example.com || true
+    restart: on-failure
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: batch-airflow-webserver
+    command: webserver
+    ports:
+      - "8081:8080"     # UI (8080 занят Project 1, если он поднят)
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    restart: "no"
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: batch-airflow-scheduler
+    command: scheduler
+    ports:
+      - "4040:4040"     # Spark UI (live, пока идёт джоба)
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    restart: "no"
+
+  # История Spark-джоб (UI после завершения) — читает event-логи из общего тома.
+  spark-history:
+    image: apache/spark:3.5.3
+    container_name: batch-spark-history
+    command:
+      - /bin/sh
+      - -c
+      - >
+        mkdir -p /opt/spark-events &&
+        /opt/spark/sbin/start-history-server.sh &&
+        tail -F /opt/spark/logs/*HistoryServer*.out
+    environment:
+      SPARK_HISTORY_OPTS: "-Dspark.history.fs.logDirectory=file:/opt/spark-events"
+    ports:
+      - "18080:18080"
+    volumes:
+      - ./data/spark-events:/opt/spark-events
+    restart: "no"
+
+volumes:
+  clickhouse-data:
+  airflow-postgres-data:

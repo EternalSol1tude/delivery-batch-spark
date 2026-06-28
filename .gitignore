@@ -1,0 +1,25 @@
+# --- секреты ---
+.env
+
+# --- данные (датасет качается отдельно, ~700 МБ; артефакты Spark) ---
+data/raw/*
+!data/raw/.gitkeep
+data/lake/
+data/landing/*
+!data/landing/.gitkeep
+data/spark-events/
+data/metrics/
+
+# --- Airflow runtime ---
+airflow/logs/
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+
+# --- ОС / редакторы ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

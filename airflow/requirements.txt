@@ -1,0 +1,4 @@
+# Spark в local-режиме + загрузка витрин в ClickHouse.
+pyspark==3.5.3
+clickhouse-connect==0.7.19
+pyarrow==17.0.0
